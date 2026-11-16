@@ -1,0 +1,28 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "StrongPassword123!"
+    ports:
+      - "1433:1433"
+
+  books-api:
+    build:
+      context: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=BooksDb;User Id=sa;Password=StrongPassword123!;TrustServerCertificate=True;"
+    depends_on:
+      - sqlserver
+
+  books-web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: "http://localhost:8080"
+    ports:
+      - "3000:8080"
+    depends_on:
+      - books-api

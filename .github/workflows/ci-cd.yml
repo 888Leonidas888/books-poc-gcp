@@ -1,0 +1,106 @@
+name: CI/CD - GCP Cloud Run
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGION: us-central1
+  REPOSITORY: books-repo
+
+jobs:
+  test-backend:
+    name: Test Backend (.NET 10)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run xUnit tests
+        run: dotnet test backend/Books.Tests/Books.Tests.csproj --configuration Release
+
+  test-frontend:
+    name: Test Frontend (React + Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run Vitest tests
+        working-directory: ./frontend
+        run: npm test
+
+  deploy:
+    name: Deploy to GCP Cloud Run
+    needs: [test-backend, test-frontend]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and Push Backend Image
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/books-api:${{ github.sha }}"
+          docker build -t "$IMAGE" ./backend
+          docker push "$IMAGE"
+
+      - name: Deploy Backend (books-api) to Cloud Run
+        id: deploy-api
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: books-api
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/books-api:${{ github.sha }}
+          secrets: ConnectionStrings__DefaultConnection=db-connection-string:latest
+          flags: --allow-unauthenticated --port=8080
+
+      - name: Build and Push Frontend Image with Backend URL
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/books-web:${{ github.sha }}"
+          docker build \
+            --build-arg VITE_API_URL="${{ steps.deploy-api.outputs.url }}" \
+            -t "$IMAGE" ./frontend
+          docker push "$IMAGE"
+
+      - name: Deploy Frontend (books-web) to Cloud Run
+        id: deploy-web
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: books-web
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/books-web:${{ github.sha }}
+          flags: --allow-unauthenticated --port=8080
+
+      - name: Show Deployed URLs
+        run: |
+          echo "Backend API URL: ${{ steps.deploy-api.outputs.url }}"
+          echo "Frontend Web URL: ${{ steps.deploy-web.outputs.url }}"
